@@ -23,10 +23,120 @@ from fastapi.responses import HTMLResponse, FileResponse
 import joblib
 from pydantic import BaseModel, Field
 
+# Search libraries for dynamic verification
+try:
+    from duckduckgo_search import DDGS
+except ImportError:
+    DDGS = None
+
+try:
+    from googlesearch import search as google_search
+except ImportError:
+    google_search = None
+
 # Model & Vectorizer paths
 MODEL_PATH = "model.pkl"
 VECTORIZER_PATH = "tfidf_vectorizer.pkl"
 INDEX_HTML_PATH = "index.html"
+
+# =====================================================================
+# INDIAN GOVERNMENT & PUBLIC SECTOR COMPREHENSIVE KEYWORDS & PATTERNS
+# =====================================================================
+GOVT_KEYWORD_PHRASES = [
+    # Central Commissions & Recruitment Bodies
+    "union public service commission",
+    "staff selection commission",
+    "railway recruitment board",
+    "railway recruitment cell",
+    "institute of banking personnel selection",
+    "national testing agency",
+    "central government",
+    "state government",
+    "government of india",
+    "govt of india",
+    "sarkari naukri",
+    "sarkari result",
+    "sarkari job",
+    "gazetted officer",
+    "public service commission",
+    "subordinate services selection board",
+    "civil services examination",
+
+    # Defense & Paramilitary Forces
+    "indian army",
+    "indian navy",
+    "indian air force",
+    "armed forces",
+    "drdo",
+    "isro",
+    "ordnance factory",
+    "border security force",
+    "central reserve police force",
+    "central industrial security force",
+    "indo-tibetan border police",
+    "sashastra seema bal",
+    "assam rifles",
+    "national security guard",
+    "delhi police",
+    "state police recruitment",
+    "constable recruitment",
+    "sub inspector recruitment",
+
+    # Ministries & Public Administration
+    "ministry of railways",
+    "ministry of defence",
+    "ministry of home affairs",
+    "ministry of finance",
+    "ministry of education",
+    "ministry of health",
+    "ministry of electronics",
+    "department of posts",
+    "india post",
+    "income tax department",
+    "central board of indirect taxes",
+    "customs and central excise",
+    "reserve bank of india",
+    "state bank of india",
+    "life insurance corporation",
+    "public sector undertaking",
+    "public sector bank"
+]
+
+# Exact abbreviation / acronym regex patterns (strictly checked with word boundaries)
+GOVT_ACRONYMS = [
+    # Central Commissions
+    "upsc", "ssc", "rrb", "rrc", "ibps", "nta",
+    # All State PSCs
+    "appsc", "apsc", "bpsc", "cgpsc", "gpsc", "hpsc", "hppsc",
+    "jkpsc", "jpsc", "kpsc", "mppsc", "mpsc", "opsc", "ppsc",
+    "rpsc", "tnpsc", "tspsc", "uppsc", "ukpsc", "wbpsc", "spsc",
+    "dsssb", "rsmssb", "upsssc", "hssc", "bssc", "osssc",
+    # Defense & Paramilitary
+    "drdo", "isro", "nda", "cds", "afcat", "bsf", "crpf", "cisf", "itbp", "ssb", "nsg", "capf",
+    # Civil Services & Intelligence
+    "ias", "ips", "ifs", "irs", "cbi", "ib", "raw", "nia",
+    # Major PSUs (Maharatna, Navratna, Miniratna)
+    "ongc", "iocl", "bpcl", "hpcl", "gail", "sail", "bhel", "ntpc",
+    "pgcil", "powergrid", "bel", "hal", "beml", "nalco", "nmdc",
+    "coal india", "oil india", "rec", "pfc", "nbcc", "concor", "rinl",
+    "ecil", "midhani", "mazagon dock", "cochin shipyard", "bdl", "nhpc", "sjvn",
+    # Public Financial Institutions & Banks
+    "sbi", "rbi", "nabard", "sebi", "lic", "gic", "pnb", "bob", "sidbi"
+]
+
+# Official Indian Government TLDs & PSU Domains
+OFFICIAL_GOVT_TLDS = (".gov.in", ".nic.in", ".ernet.in")
+
+OFFICIAL_PSU_DOMAINS = {
+    "ongcindia.com", "iocl.com", "bpcl.in", "bharatpetroleum.in",
+    "hpcl.co.in", "hindustanpetroleum.com", "gailonline.com", "coalindia.in",
+    "sail.co.in", "bhel.com", "ntpc.co.in", "powergrid.in", "oil-india.com",
+    "bel-india.in", "hal-india.co.in", "bemlindia.in", "nalcoindia.com",
+    "nmdc.co.in", "sbi.co.in", "rbi.org.in", "licindia.in", "ibps.in",
+    "drdo.gov.in", "isro.gov.in", "indianrailways.gov.in", "upsc.gov.in",
+    "ssc.gov.in", "nta.ac.in", "joinindianarmy.nic.in", "joinindiannavy.gov.in",
+    "careerindianairforce.cdac.in", "indiapost.gov.in"
+}
 
 # Trusted corporate networks for verification
 TRUSTED_CORPORATE_DOMAINS = [
@@ -85,15 +195,7 @@ def search_corporate_presence(company_name: str) -> bool:
     """
     Corporate Web Search Gate:
     Dynamically checks top-5 web search results for the given company name.
-    Verifies if any returned URL belongs to trusted corporate networks:
-      - linkedin.com/company
-      - glassdoor
-      - zaubacorp
-      - ambitionbox
-      - naukri
-      - indeed
-    Allows real mid-level IT companies/startups (like Beauroi Technologies)
-    while strictly blocking made-up companies (like Ajay Solutions).
+    Verifies if any returned URL belongs to trusted corporate networks.
     """
     clean = company_name.strip()
     if not clean:
@@ -210,18 +312,147 @@ SCAM_RED_FLAGS = [
 ]
 
 
+def detect_indian_govt_job(company: str, description: str) -> tuple[bool, list[str]]:
+    """
+    Detects if the job claims to be an Indian Government or Public Sector role
+    using extensive phrase matching and word-bounded acronym checks.
+    """
+    full_text = f"{company} {description}".lower()
+    matched = []
+
+    # 1. Check exact multi-word government phrases
+    for phrase in GOVT_KEYWORD_PHRASES:
+        if phrase in full_text:
+            matched.append(phrase)
+
+    # 2. Check word-bounded acronyms (avoid partial word false positives)
+    for acr in GOVT_ACRONYMS:
+        pattern = r"(?:\b|_)" + re.escape(acr) + r"(?:\b|_)"
+        if re.search(pattern, full_text):
+            matched.append(acr.upper())
+
+    return (len(matched) > 0, list(set(matched)))
+
+
+def is_official_govt_domain(url: str) -> tuple[bool, str]:
+    """
+    Checks if a given URL belongs to official Indian Government domains
+    (.gov.in, .nic.in, .ernet.in, or known official PSU domains).
+    """
+    try:
+        parsed = urllib.parse.urlparse(url if "://" in url else "https://" + url)
+        host = (parsed.netloc or parsed.path).lower().split(":")[0].strip()
+        if host.startswith("www."):
+            host = host[4:]
+
+        # Check official Indian government TLDs
+        for tld in OFFICIAL_GOVT_TLDS:
+            if host.endswith(tld):
+                return True, host
+
+        # Check known official PSU domains
+        for psu in OFFICIAL_PSU_DOMAINS:
+            if host == psu or host.endswith("." + psu):
+                return True, host
+
+        return False, host
+    except Exception:
+        return False, ""
+
+
+def verify_govt_job_live_search(company: str, description: str, user_url: str = "") -> tuple[bool, str, list[str]]:
+    """
+    Runs live web search to verify whether an Indian Government / PSU job has
+    an authentic official .gov.in, .nic.in, .ernet.in or PSU portal source.
+    """
+    extracted_urls = []
+
+    # 1. Check user-provided URL if provided
+    if user_url and user_url.strip():
+        extracted_urls.append(user_url.strip())
+
+    # Extract any embedded URLs in the description
+    embedded = re.findall(r"https?://[^\s<>\"']+", description)
+    extracted_urls.extend(embedded)
+
+    for u in extracted_urls:
+        is_gov, domain = is_official_govt_domain(u)
+        if is_gov:
+            return True, f"https://{domain}", [u]
+
+    # 2. Extract core organization / role for search query
+    clean_company = company.strip()
+    first_line = description.split("\n")[0][:80].strip()
+    search_query = f"{clean_company} {first_line} recruitment official notification"
+    search_query = re.sub(r"[^a-zA-Z0-9\s]", " ", search_query)
+    search_query = re.sub(r"\s+", " ", search_query).strip()[:100]
+
+    found_urls = []
+
+    # Try duckduckgo_search first
+    if DDGS:
+        try:
+            with DDGS(timeout=6) as ddgs:
+                for r in ddgs.text(f"{search_query} site:gov.in OR site:nic.in", max_results=5):
+                    href = r.get("href") or r.get("url") or ""
+                    if href:
+                        found_urls.append(href)
+        except Exception as e:
+            print(f"[DDGS Govt Search Error] {e}")
+
+    # Fallback / augment with googlesearch
+    if not found_urls and google_search:
+        try:
+            for u in google_search(f"{search_query} site:gov.in OR site:nic.in", num_results=5, timeout=6):
+                found_urls.append(u)
+        except Exception as e:
+            print(f"[Google Govt Search Error] {e}")
+
+    # Fallback to general search if site-restricted search returned nothing
+    if not found_urls:
+        if DDGS:
+            try:
+                with DDGS(timeout=6) as ddgs:
+                    for r in ddgs.text(search_query, max_results=5):
+                        href = r.get("href") or r.get("url") or ""
+                        if href:
+                            found_urls.append(href)
+            except Exception:
+                pass
+        if not found_urls and google_search:
+            try:
+                for u in google_search(search_query, num_results=5, timeout=6):
+                    found_urls.append(u)
+            except Exception:
+                pass
+
+    # Final reliable fallback: Bing search scraper
+    if not found_urls:
+        found_urls = fetch_search_urls(f"{search_query} gov in", max_results=5)
+
+    # 3. Domain Verification: Check live search results
+    for u in found_urls:
+        is_gov, domain = is_official_govt_domain(u)
+        if is_gov:
+            return True, f"https://{domain}", found_urls
+
+    return False, "", found_urls
+
+
 class JobCheckRequest(BaseModel):
-    company_name: str = Field(..., example="Google")
+    company_name: str = Field(..., example="UPSC")
     job_description: str = Field(
         ...,
-        example="We are hiring a Senior Software Engineer for a full-time role. Requirements include a Bachelor degree, 5+ years of experience with Python, and strong skills. Apply with resume."
+        example="Union Public Service Commission invites applications for Civil Services Examination. Full-time gazetted officer post."
     )
+    job_url: str = Field("", example="https://upsc.gov.in")
 
 
 class JobCheckResponse(BaseModel):
     prediction: str
     reason: str = ""
     company_name: str = ""
+    confidence: float = 0.0
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -251,12 +482,13 @@ def predict_job(payload: JobCheckRequest):
     """
     Enhanced Hybrid Gatekeeper for Fake Job Detection.
     Order of execution:
-      Gate 0: Corporate Web Search Gate (verifies presence on LinkedIn, Glassdoor, or job registries)
+      Gate -2: Dead Link Gate (Verifies if provided URL actually exists online)
+      Gate -1: Indian Government / Public Sector Job Interceptor
+      Gate 0: Corporate Web Search Gate (verifies private corporate presence)
       Gate 1: Word Count Gate (must be >= 15 words)
       Gate 2: Red Flag Gate (strictly checks for scam/financial red flags)
       Gate 3: Positive Vocabulary Gate (must contain at least one HR keyword)
       Gate 4: ML Confidence Gate (internal threshold >= 0.50)
-    Note: Percentages are hidden from the client response.
     """
     if model is None or vectorizer is None:
         raise HTTPException(
@@ -266,10 +498,61 @@ def predict_job(payload: JobCheckRequest):
 
     company = payload.company_name.strip()
     description = payload.job_description.strip()
+    user_url = getattr(payload, "job_url", "").strip()
     full_text = f"{company} {description}".strip()
 
     # -----------------------------------------------------------------
-    # GATE 0: CORPORATE WEB SEARCH GATE
+    # GATE -2: THE DEAD LINK GATE (Works for Govt & Private)
+    # Instantly flags jobs if the provided URL does not exist or is dead
+    # -----------------------------------------------------------------
+    if user_url:
+        print(f"[Link Checker] Verifying if {user_url} is a live website...")
+        try:
+            check_url = user_url if "://" in user_url else "https://" + user_url
+            link_resp = requests.get(check_url, timeout=6, impersonate="chrome")
+            if link_resp.status_code == 404:
+                print(f"[Link Checker] Failed: Website returned 404 Not Found")
+                return JobCheckResponse(
+                    prediction="Fake",
+                    reason=f"Dead Link Detected: The provided website ({user_url}) is broken or offline.",
+                    company_name=company
+                )
+        except Exception as e:
+            print(f"[Link Checker] Failed (Domain does not exist): {e}")
+            return JobCheckResponse(
+                prediction="Fake",
+                reason=f"Fake Domain Detected: The website ({user_url}) does not actually exist on the internet.",
+                company_name=company
+            )
+
+    # -----------------------------------------------------------------
+    # GATE -1: INDIAN GOVERNMENT & PUBLIC SECTOR JOB INTERCEPTOR
+    # Intercepts ANY Indian govt / PSU job before it reaches the ML model
+    # -----------------------------------------------------------------
+    is_govt, matched_entities = detect_indian_govt_job(company, description)
+    if is_govt:
+        print(f"[Govt Gatekeeper] Intercepted Indian Government / PSU claim: {matched_entities}")
+        is_verified_govt, verified_link, search_urls = verify_govt_job_live_search(company, description, user_url)
+
+        if is_verified_govt:
+            print(f"[Govt Gatekeeper] Official source verified: {verified_link}")
+            return JobCheckResponse(
+                prediction="Real",
+                reason=f"Verified official Indian Government / PSU source found ({verified_link}).",
+                company_name=company,
+                confidence=0.99
+            )
+        else:
+            print(f"[Govt Gatekeeper] No official government domain verified in search results: {search_urls}")
+            return JobCheckResponse(
+                prediction="Fake",
+                reason="This job claims to be an Indian Government or Public Sector role, but no official source (.gov.in, .nic.in, or registered PSU portal) could be verified.",
+                company_name=company,
+                confidence=0.99
+            )
+
+    # -----------------------------------------------------------------
+    # GATE 0: CORPORATE WEB SEARCH GATE (PRIVATE SECTOR)
     # Strictly reject unverified / made-up companies without corporate presence
     # -----------------------------------------------------------------
     if not search_corporate_presence(company):
