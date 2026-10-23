@@ -155,6 +155,28 @@ WELL_KNOWN_ENTERPRISES = {
     "oracle", "cisco", "intel", "nvidia", "adobe", "salesforce"
 }
 
+# Explicit scam phrases & negative patterns for the Red Flag Gate
+SCAM_RED_FLAGS = [
+    "registration fee",
+    "wire transfer",
+    "western union",
+    "deposit",
+    "crypto",
+    "whatsapp",
+    "no interview",
+    "earn money from home",
+    "bank details",
+    "processing fee",
+    "send a check"
+]
+
+# Mandatory job vocabulary required for Positive Vocabulary Gate
+MANDATORY_JOB_KEYWORDS = {
+    "experience", "salary", "requirements", "skills", "apply",
+    "candidate", "role", "qualifications", "degree", "shift",
+    "full-time", "part-time", "resume", "hiring"
+}
+
 
 def decode_bing_u(u_val: str) -> str:
     """Decodes Bing's encoded search redirect URL parameter."""
@@ -287,29 +309,6 @@ def clean_text(text: str) -> str:
     text = re.sub(r"[^a-zA-Z\s]", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip().lower()
-
-
-# Mandatory job vocabulary required for Positive Vocabulary Gate
-MANDATORY_JOB_KEYWORDS = {
-    "experience", "salary", "requirements", "skills", "apply",
-    "candidate", "role", "qualifications", "degree", "shift",
-    "full-time", "part-time", "resume", "hiring"
-}
-
-# Explicit scam phrases & negative patterns for the Red Flag Gate
-SCAM_RED_FLAGS = [
-    "registration fee",
-    "wire transfer",
-    "western union",
-    "deposit",
-    "crypto",
-    "whatsapp",
-    "no interview",
-    "earn money from home",
-    "bank details",
-    "processing fee",
-    "send a check"
-]
 
 
 def detect_indian_govt_job(company: str, description: str) -> tuple[bool, list[str]]:
@@ -532,6 +531,18 @@ def predict_job(payload: JobCheckRequest):
     is_govt, matched_entities = detect_indian_govt_job(company, description)
     if is_govt:
         print(f"[Govt Gatekeeper] Intercepted Indian Government / PSU claim: {matched_entities}")
+        
+        # First check for red flags (e.g., asking for money) in the govt job
+        text_lower = full_text.lower()
+        matched_red_flags = [flag for flag in SCAM_RED_FLAGS if re.search(r"(?:\b|_)" + re.escape(flag) + r"(?:\b|_)", text_lower) or flag in text_lower]
+        
+        if matched_red_flags:
+            return JobCheckResponse(
+                prediction="Fake",
+                reason="Suspicious financial requests or scam patterns detected in this Government job claim.",
+                company_name=company
+            )
+
         is_verified_govt, verified_link, search_urls = verify_govt_job_live_search(company, description, user_url)
 
         if is_verified_govt:
@@ -542,13 +553,21 @@ def predict_job(payload: JobCheckRequest):
                 company_name=company,
                 confidence=0.99
             )
-        else:
-            print(f"[Govt Gatekeeper] No official government domain verified in search results: {search_urls}")
+        elif user_url:
+            print(f"[Govt Gatekeeper] Invalid url provided for govt job: {user_url}")
             return JobCheckResponse(
                 prediction="Fake",
-                reason="This job claims to be an Indian Government or Public Sector role, but no official source (.gov.in, .nic.in, or registered PSU portal) could be verified.",
+                reason="Fake Government Link: Official government jobs use .gov.in or .nic.in domains. The link provided is not official.",
                 company_name=company,
                 confidence=0.99
+            )
+        else:
+            print(f"[Govt Gatekeeper] No URL provided. Approving based on Govt keywords safely.")
+            return JobCheckResponse(
+                prediction="Real",
+                reason="Valid Government / PSU job profile detected based on official keywords. Please manually verify and apply only on the official .gov.in website.",
+                company_name=company,
+                confidence=0.90
             )
 
     # -----------------------------------------------------------------
